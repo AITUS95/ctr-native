@@ -5,8 +5,8 @@
 // L3 toggles the mode. Enabling converts the current human driver into the
 // retail BOTS driving pipeline without respawning it, then relocalizes the AI
 // to the closest forward nav segment so it continues from the activation point.
-// Disabling removes the driver from the AI nav list and restores normal player
-// physics at the position/speed reached by the CPU.
+// Disabling happens at the beginning of an autopilot thread tick so the BOTS
+// pipeline cannot keep rotating/moving the driver after control is returned.
 
 enum
 {
@@ -14,6 +14,8 @@ enum
 	BOSS_AUTOPILOT_NAV_AHEAD = 1,
 	BOSS_AUTOPILOT_ANGLE_MASK = 0xfff,
 	BOSS_AUTOPILOT_ANGLE_HALF = 0x800,
+	BOSS_AUTOPILOT_TIME_SCALE_NUM = 11,
+	BOSS_AUTOPILOT_TIME_SCALE_DEN = 10,
 };
 
 struct BossAutopilotState
@@ -22,11 +24,15 @@ struct BossAutopilotState
 	s16 levelID;
 	u8 initialized;
 	u8 enabled;
+	u8 pendingDisable;
+	u8 _pad;
 	u32 lastToggleFrame;
 	void (*savedThTick)(struct Thread *);
 };
 
 static struct BossAutopilotState s_bossAutopilotState[BOSS_AUTOPILOT_MAX_DRIVERS];
+
+static void BossAutopilot_ThTick_Drive(struct Thread *thread);
 
 static int BossAutopilot_GetCharacterID(struct Driver *driver)
 {
@@ -166,6 +172,7 @@ static void BossAutopilot_Disable(struct Thread *thread, struct Driver *driver, 
 	driver->funcPtrs[DRIVER_FUNC_INIT] = VehPhysProc_Driving_Init;
 	VehPhysProc_Driving_Init(thread, driver);
 
+	state->pendingDisable = 0;
 	state->enabled = 0;
 }
 
@@ -234,11 +241,64 @@ static int BossAutopilot_Enable(struct Thread *thread, struct Driver *driver, st
 	driver->botData.botFlags |= BOT_FLAG_STARTLINE_INIT_DONE;
 	driver->botData.botAccel = 0;
 
-	// Full CPU control starts on the next thread tick: throttle, braking,
-	// steering, drifting, jumps, collision recovery and nav-path progression.
-	thread->funcThTick = BOTS_ThTick_Drive;
+	// Use a wrapper around the retail CPU tick. The wrapper handles L3 before
+	// BOTS runs, which prevents a final AI rotation after returning to manual
+	// control, and gives autopilot a modest ~10% time/speed advantage.
+	thread->funcThTick = BossAutopilot_ThTick_Drive;
+	state->pendingDisable = 0;
 	state->enabled = 1;
 	return 1;
+}
+
+static int BossAutopilot_IsL3Tapped(struct Driver *driver)
+{
+	return (sdata->gGamepads->gamepad[driver->driverID].buttonsTapped & BTN_L3) != 0;
+}
+
+static void BossAutopilot_ThTick_Drive(struct Thread *thread)
+{
+	struct Driver *driver = thread != NULL ? (struct Driver *)thread->object : NULL;
+	struct BossAutopilotState *state = BossAutopilot_GetState(driver);
+	struct GameTracker *gGT = sdata->gGT;
+
+	if (thread == NULL || driver == NULL || state == NULL || gGT == NULL || !state->enabled)
+	{
+		BOTS_ThTick_Drive(thread);
+		return;
+	}
+
+	// Handle deactivation before entering BOTS. This is the important part for
+	// the camera: no remainder of an AI tick can run after ACTION_BOT is cleared.
+	if (state->pendingDisable ||
+	    (BossAutopilot_IsL3Tapped(driver) && state->lastToggleFrame != gGT->timer))
+	{
+		state->lastToggleFrame = gGT->timer;
+		BossAutopilot_Disable(thread, driver, state);
+		return;
+	}
+
+	// A small, stable speed increase without altering global AI difficulty or
+	// the other CPU racers. BOTS integrates movement from elapsedTimeMS, so only
+	// this driver's CPU tick sees ~10% more simulated time; the global value is
+	// restored immediately afterward.
+	int elapsedTimeMS = gGT->elapsedTimeMS;
+	int scaledElapsed = CTR_MipsDiv(CTR_MipsMulLo(elapsedTimeMS, BOSS_AUTOPILOT_TIME_SCALE_NUM), BOSS_AUTOPILOT_TIME_SCALE_DEN);
+	if (scaledElapsed < elapsedTimeMS)
+	{
+		scaledElapsed = elapsedTimeMS;
+	}
+	gGT->elapsedTimeMS = scaledElapsed;
+
+	BOTS_ThTick_Drive(thread);
+
+	gGT->elapsedTimeMS = elapsedTimeMS;
+
+	// Some BOTS recovery paths restore the retail BOTS_ThTick_Drive pointer.
+	// Re-wrap it so L3 remains a clean toggle after jumps/mask recovery too.
+	if (state->enabled && thread->funcThTick == BOTS_ThTick_Drive)
+	{
+		thread->funcThTick = BossAutopilot_ThTick_Drive;
+	}
 }
 
 static void BossAutopilot_UpdateToggle(struct Thread *thread, struct Driver *driver)
@@ -260,32 +320,40 @@ static void BossAutopilot_UpdateToggle(struct Thread *thread, struct Driver *dri
 	{
 		if (state->enabled)
 		{
-			BossAutopilot_Disable(thread, driver, state);
+			state->pendingDisable = 1;
+			thread->funcThTick = BossAutopilot_ThTick_Drive;
 		}
 		return;
 	}
 
-	if ((sdata->gGamepads->gamepad[driver->driverID].buttonsTapped & BTN_L3) == 0)
+	// While BOTS is active this frameproc is called from inside the AI tick.
+	// Never disable here: doing so would let the remainder of the same BOTS tick
+	// rotate/move a driver that has already been returned to player control.
+	if (state->enabled)
+	{
+		if (BossAutopilot_IsL3Tapped(driver) && state->lastToggleFrame != gGT->timer)
+		{
+			state->lastToggleFrame = gGT->timer;
+			state->pendingDisable = 1;
+		}
+
+		if (thread->funcThTick == BOTS_ThTick_Drive)
+		{
+			thread->funcThTick = BossAutopilot_ThTick_Drive;
+		}
+		return;
+	}
+
+	if (!BossAutopilot_IsL3Tapped(driver))
 	{
 		return;
 	}
 
-	// A newly-enabled BOTS thread can execute later in this same game frame and
-	// calls VehFrameProc_Driving again. buttonsTapped still contains the original
-	// L3 edge at that point, so without this guard the very same click enables
-	// and then immediately disables autopilot. Consume a toggle at most once per
-	// gGT frame; a later physical L3 click on a new frame can toggle normally.
 	if (state->lastToggleFrame == gGT->timer)
 	{
 		return;
 	}
 	state->lastToggleFrame = gGT->timer;
-
-	if (state->enabled)
-	{
-		BossAutopilot_Disable(thread, driver, state);
-		return;
-	}
 
 	if ((driver->actionsFlagSet & (ACTION_BOT | ACTION_RACE_FINISHED)) != 0 || gGT->trafficLightsTimer > 0)
 	{
