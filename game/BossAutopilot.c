@@ -180,6 +180,34 @@ static void BossAutopilot_ResetPlayerCamera(struct Driver *driver)
 	cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
 }
 
+static void BossAutopilot_ResetPlayerAngularState(struct Driver *driver)
+{
+	// BOTS_ThTick_Drive writes rotCurr.w as a camera-facing yaw offset between
+	// the driver's logical angle and the AI nav yaw. Human camera follow adds
+	// rotCurr.w directly to driver->angle, so leaving this value alive makes the
+	// camera keep orbiting after ACTION_BOT has already been cleared.
+	driver->rotCurr.w = 0;
+	driver->rotPrev.w = 0;
+
+	// Remove the remaining steering/drift interpolation state at the same
+	// handoff. These values are human-physics state and must restart neutral;
+	// position, forward yaw and linear speed from the CPU remain untouched.
+	driver->simpTurnState = 0;
+	driver->wheelRotation = 0;
+	driver->turnAngleCurr = 0;
+	driver->turnAnglePrev = 0;
+	driver->turnAngleLerpTarget = 0;
+	driver->turnAngleLerpVel = 0;
+	driver->multDrift = 0;
+	driver->previousFrameMultDrift = 0;
+	driver->timeUntilDriftSpinout = 0;
+	driver->ampTurnState = 0;
+	driver->rotationSpinRate = 0;
+	driver->turnWobbleAngle = 0;
+	driver->turnWobbleTimer = 0;
+	driver->turnWobbleVelocity = 0;
+}
+
 static void BossAutopilot_Disable(struct Thread *thread, struct Driver *driver, struct BossAutopilotState *state)
 {
 	if (state == NULL || !state->enabled)
@@ -199,19 +227,15 @@ static void BossAutopilot_Disable(struct Thread *thread, struct Driver *driver, 
 	driver->actionsFlagSet &= ~(ACTION_BOT | ACTION_ENGINE_ECHO | ACTION_BACK_SKID | ACTION_FRONT_SKID | ACTION_DROPPING_MINE);
 	thread->funcThTick = state->savedThTick;
 
-	// Keep the position, orientation and linear speed produced by BOTS, but
-	// discard the AI-only navigation state before returning to human physics.
+	// Keep the position, forward yaw and linear speed produced by BOTS, but
+	// discard all AI-only navigation and camera/steering angular state before
+	// returning to human physics.
 	memset(&driver->botData, 0, sizeof(struct BotData));
-	driver->turnAngleCurr = 0;
-	driver->multDrift = 0;
-	driver->ampTurnState = 0;
-	driver->rotationSpinRate = 0;
+	BossAutopilot_ResetPlayerAngularState(driver);
 	driver->funcPtrs[DRIVER_FUNC_INIT] = VehPhysProc_Driving_Init;
 	VehPhysProc_Driving_Init(thread, driver);
 
 	// Snap the camera state back to ordinary player-follow in the same handoff.
-	// This removes intermittent post-BOTS spins caused by delayed transition/EOR
-	// camera state that can survive the physics conversion by one or more frames.
 	BossAutopilot_ResetPlayerCamera(driver);
 
 	state->pendingDisable = 0;
