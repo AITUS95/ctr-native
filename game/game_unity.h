@@ -238,19 +238,24 @@
 #include "Vehicle/VehPhysForce.c"
 #include "Vehicle/VehGroundShadow.c"
 
+// Keep retail angular physics privately. BossCornerAssistPhysics.c exposes the
+// public symbol and layers curve-only steering/braking on normal player physics.
 #define VehPhysGeneral_GetBaseSpeed VehPhysGeneral_GetBaseSpeed_Original
+#define VehPhysGeneral_PhysAngular VehPhysGeneral_PhysAngular_Original
 #include "Vehicle/VehPhysGeneral.c"
+#undef VehPhysGeneral_PhysAngular
 #undef VehPhysGeneral_GetBaseSpeed
 
 #include "Vehicle/VehPhysJoystick.c"
+#include "BossCornerAssistPhysics.c"
 #include "Vehicle/VehGroundSkids.c"
 
 #include "Vehicle/VehPhysProc.c"
 
 #include "Vehicle/VehPickupItem.c"
 
-// Layer the optional L3 CPU autopilot on top of the stable playable-boss
-// frame wrapper without changing the boss mechanics themselves.
+// Layer the optional L3 manual curve assist on top of playable-boss mechanics.
+// The assist never converts the player to BOTS.
 #define VehFrameProc_Driving VehFrameProc_Driving_BossPlayable
 #include "BossPlayable.c"
 #undef VehFrameProc_Driving
