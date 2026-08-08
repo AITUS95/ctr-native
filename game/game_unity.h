@@ -59,7 +59,12 @@
 
 #include "FLARE.c"
 
+// Preserve CTR's retail button mapper privately, then expose a native wrapper
+// that reserves the physical L3 click exclusively as BTN_L3.
+#define GAMEPAD_ProcessHold GAMEPAD_ProcessHold_Original
 #include "GAMEPAD.c"
+#undef GAMEPAD_ProcessHold
+#include "GamepadL3Fix.c"
 
 #include "GAMEPROG.c"
 
@@ -238,7 +243,7 @@
 
 #include "Vehicle/VehPickupItem.c"
 
-// Layer the optional L3 corner assistant on top of the stable playable-boss
+// Layer the optional L3 CPU autopilot on top of the stable playable-boss
 // frame wrapper without changing the boss mechanics themselves.
 #define VehFrameProc_Driving VehFrameProc_Driving_BossPlayable
 #include "BossPlayable.c"
