@@ -177,7 +177,6 @@
 #include "RECTMENU.c"
 
 #include "RaceConfig.c"
-
 #include "RefreshCard.c"
 
 #include "SelectProfile.c"
@@ -238,7 +237,14 @@
 #include "Vehicle/VehPhysProc.c"
 
 #include "Vehicle/VehPickupItem.c"
+
+// Layer the optional L3 corner assistant on top of the stable playable-boss
+// frame wrapper without changing the boss mechanics themselves.
+#define VehFrameProc_Driving VehFrameProc_Driving_BossPlayable
 #include "BossPlayable.c"
+#undef VehFrameProc_Driving
+#include "BossCornerAssist.c"
+
 #include "Vehicle/VehPickState.c"
 
 #include "Vehicle/VehStuckProc.c"
