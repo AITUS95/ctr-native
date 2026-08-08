@@ -215,19 +215,30 @@
 #include "Vehicle/VehAfterColl.c"
 #include "Vehicle/VehEmitter.c"
 #include "Vehicle/VehFire.c"
+
+// Keep the retail/native implementation available, then expose a playable-boss
+// wrapper under the original symbol name from BossPlayable.c.
+#define VehFrameProc_Driving VehFrameProc_Driving_Original
 #include "Vehicle/VehFrame.c"
+#undef VehFrameProc_Driving
+
 #include "Vehicle/VehLap.c"
 #include "Vehicle/VehPhysCrash.c"
 
 #include "Vehicle/VehPhysForce.c"
 #include "Vehicle/VehGroundShadow.c"
+
+#define VehPhysGeneral_GetBaseSpeed VehPhysGeneral_GetBaseSpeed_Original
 #include "Vehicle/VehPhysGeneral.c"
+#undef VehPhysGeneral_GetBaseSpeed
+
 #include "Vehicle/VehPhysJoystick.c"
 #include "Vehicle/VehGroundSkids.c"
 
 #include "Vehicle/VehPhysProc.c"
 
 #include "Vehicle/VehPickupItem.c"
+#include "BossPlayable.c"
 #include "Vehicle/VehPickState.c"
 
 #include "Vehicle/VehStuckProc.c"
@@ -265,7 +276,13 @@
 #include "231/RB_Instance.c"
 #include "231/RB_Player.c"
 #include "231/RB_MinePool.c"
+
+// Preserve the original hazard implementation under a private symbol. The
+// public wrapper in BossPlayable.c only filters the confirmed plant-eat case.
+#define RB_Hazard_HurtDriver RB_Hazard_HurtDriver_Original
 #include "231/RB_Hazard.c"
+#undef RB_Hazard_HurtDriver
+
 #include "231/RB_Potion.c"
 #include "231/RB_GenericMine.c"
 #include "231/RB_TNT.c"

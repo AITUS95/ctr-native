@@ -1,0 +1,73 @@
+name: Windows boss-play build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - boss-play
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x86
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout boss-play
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC x86
+        run: cmake --preset windows-msvc-x86
+
+      - name: Build Release
+        run: cmake --build --preset windows-msvc-x86-release --parallel
+
+      - name: Run smoke tests
+        run: ctest --preset windows-msvc-x86-release
+
+      - name: Package playable build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          New-Item -ItemType Directory -Force package/assets | Out-Null
+          Copy-Item build-msvc-x86/Release/ctr_native.exe package/ctr_native.exe
+
+          @'
+          @echo off
+          cd /d "%~dp0"
+          if not exist "assets\ctr-u.bin" (
+            echo.
+            echo Missing assets\ctr-u.bin
+            echo Copy your own NTSC-U Crash Team Racing raw BIN image into the assets folder,
+            echo then run this file again.
+            echo.
+            pause
+            exit /b 1
+          )
+          start "" "ctr_native.exe"
+          '@ | Set-Content package/run-game.bat -Encoding ascii
+
+          @'
+          Boss-play Windows build
+          =======================
+
+          1. Copy your own NTSC-U retail Crash Team Racing raw BIN image to:
+               assets\ctr-u.bin
+          2. Double-click run-game.bat.
+
+          GitHub Actions cannot open a game window on your local PC, so this artifact
+          contains a one-click launcher for Windows instead. The retail game image is
+          intentionally not bundled.
+          '@ | Set-Content package/README-WINDOWS.txt -Encoding ascii
+
+          'Put your own ctr-u.bin in this folder.' | Set-Content package/assets/PUT-CTR-U-BIN-HERE.txt -Encoding ascii
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr-native-boss-play-windows-x86
+          path: package
+          if-no-files-found: error
+          retention-days: 14
