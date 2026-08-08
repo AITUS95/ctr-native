@@ -370,7 +370,7 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 
 			if (gGT->mpkIcons != 0)
 			{
-				DecalGlobal_Store(gGT, levTexLookup);
+				DecalGlobal_Store(gGT, (struct LevTexLookup *)gGT->mpkIcons);
 			}
 		}
 
@@ -526,6 +526,7 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		if (gGT->mpkIcons != 0)
 		{
 			u32 *mpkIconList = (u32 *)*(u32 *)(gGT->mpkIcons + 4);
+
 			gGT->trafficLightIcon[0] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightredoff);
 			gGT->trafficLightIcon[1] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightredon);
 			gGT->trafficLightIcon[2] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightgreenoff);
@@ -604,7 +605,7 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		if (gGT->podium_modelIndex_First == STATIC_DINGODANCE)
 		{
 			// add "DingoFire" to loading queue
-			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_DINGOFIRE + podiumFileVariant, NULL, LOAD_Callback_Podiums);
+			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_DINGOFIRE + podiumFileVariant, (void *)&data.podiumModel_dingoFire, setPtrCb);
 		}
 
 		// add Podium
