@@ -8,6 +8,10 @@ enum
 	LOAD_NATIVE_NDBOX_INTRO_SONG_SYNC_TIME = 0x11c0,
 };
 
+int BootIntroSkip_IsRequested(void);
+int BootIntroSkip_PollRequest(void);
+void BootIntroSkip_ApplyMainMenuRedirect(struct GameTracker *gGT);
+
 static void LOAD_NativeAudio_SetStateAfterBankReload(u32 state)
 {
 	int isSameLatchedState = sdata->audioState == (s16)state;
@@ -64,22 +68,46 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 
 			sdata->boolFirstBoot = 0;
 
-			// Load Intro TIM for Copyright Page from VRAM file
-			LOAD_VramFile(bigfile, LOAD_FIRST_BOOT_COPYRIGHT_TIM_BIGFILE_INDEX, NULL, &vramSize, -1);
-			MainInit_VRAMDisplay();
+#ifdef CTR_NATIVE
+			// If a button was already pressed during SCEA, skip the Copyright
+			// page and Naughty Dog box entirely. The skip request stops XA/CSEQ
+			// and redirects the current first load straight to the title level.
+			if (BootIntroSkip_IsRequested())
+			{
+				BootIntroSkip_ApplyMainMenuRedirect(gGT);
+				levelID = MAIN_MENU_LEVEL;
+			}
+			else
+#endif
+			{
+				// Load Intro TIM for Copyright Page from VRAM file
+				LOAD_VramFile(bigfile, LOAD_FIRST_BOOT_COPYRIGHT_TIM_BIGFILE_INDEX, NULL, &vramSize, -1);
+				MainInit_VRAMDisplay();
 
 #ifdef CTR_NATIVE
-			// NOTE(aalhendi): SCEA is already held by XA playback in MainMain. The copyright
-			// TIM has no XA, so keep it visible until the intro CSEQ reaches
-			// the point retail normally reaches while loading the ND crate.
-			// Present every wait tick so both host swapchain images are
-			// overwritten with copyright instead of briefly revealing SCEA.
-			while (((sdata->songPool[0].flags & 3) == 1) && (sdata->songPool[0].timeSpentPlaying < LOAD_NATIVE_NDBOX_INTRO_SONG_SYNC_TIME))
-			{
-				VSync(0);
-				Platform_PresentVRAMDisplay();
-			}
+				// The Copyright TIM has no XA, so normal boot keeps it visible until
+				// the intro CSEQ reaches the retail synchronization point. During
+				// that blocking wait, poll raw controller buttons directly. A press
+				// exits the presentation immediately; it never edits song playback time.
+				while (((sdata->songPool[0].flags & 3) == 1) && (sdata->songPool[0].timeSpentPlaying < LOAD_NATIVE_NDBOX_INTRO_SONG_SYNC_TIME))
+				{
+					VSync(0);
+
+					if (BootIntroSkip_PollRequest())
+					{
+						// Stage 0 originally entered as the ND-box load and therefore did
+						// not back up cutscene volume. The redirected menu load will restore
+						// it in stage 6, so establish the matching backup before redirecting.
+						Cutscene_VolumeBackup();
+						BootIntroSkip_ApplyMainMenuRedirect(gGT);
+						levelID = MAIN_MENU_LEVEL;
+						break;
+					}
+
+					Platform_PresentVRAMDisplay();
+				}
 #endif
+			}
 
 			gGT->db[0].drawEnv.isbg = 0;
 			gGT->db[1].drawEnv.isbg = 0;
@@ -342,7 +370,7 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 
 			if (gGT->mpkIcons != 0)
 			{
-				DecalGlobal_Store(gGT, (struct LevTexLookup *)gGT->mpkIcons);
+				DecalGlobal_Store(gGT, levTexLookup);
 			}
 		}
 
@@ -498,7 +526,6 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		if (gGT->mpkIcons != 0)
 		{
 			u32 *mpkIconList = (u32 *)*(u32 *)(gGT->mpkIcons + 4);
-
 			gGT->trafficLightIcon[0] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightredoff);
 			gGT->trafficLightIcon[1] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightredon);
 			gGT->trafficLightIcon[2] = (struct Icon *)DecalGlobal_FindInMPK(mpkIconList, rdata.s_lightgreenoff);
@@ -577,7 +604,7 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		if (gGT->podium_modelIndex_First == STATIC_DINGODANCE)
 		{
 			// add "DingoFire" to loading queue
-			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_DINGOFIRE + podiumFileVariant, (void *)&data.podiumModel_dingoFire, setPtrCb);
+			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_DINGOFIRE + podiumFileVariant, NULL, LOAD_Callback_Podiums);
 		}
 
 		// add Podium
