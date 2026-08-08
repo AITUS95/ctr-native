@@ -9,10 +9,9 @@ enum
 	// not default range minus default dead zone.
 	RACING_WHEEL_DEFAULT_STRENGTH_DISTANCE = 0x5e,
 	JOYSTICK_STRENGTH_CURVE_SEGMENTS = 5,
-	// Native controllers do not always reach equal SDL extrema in both
-	// directions. Preserve CTR's original inner dead zone, but normalize the
-	// outer active range so either side reaches retail full-steer reliably.
-	JOYSTICK_NATIVE_OUTER_SATURATION = 0x70,
+	// Keep CTR's original inner dead zone, but reach full native steering sooner
+	// so the kart responds more strongly to moderate analog-stick movement.
+	JOYSTICK_NATIVE_OUTER_SATURATION = 0x60,
 };
 
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_CENTER == 0x80);
@@ -20,7 +19,7 @@ CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_DEAD_ZONE == 0x30);
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_RANGE == 0x7f);
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_STRENGTH_DISTANCE == 0x5e);
 CTR_STATIC_ASSERT(JOYSTICK_STRENGTH_CURVE_SEGMENTS == 5);
-CTR_STATIC_ASSERT(JOYSTICK_NATIVE_OUTER_SATURATION == 0x70);
+CTR_STATIC_ASSERT(JOYSTICK_NATIVE_OUTER_SATURATION == 0x60);
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006163c-0x800616b0.
 int VehPhysJoystick_ReturnToRest(int stickVal, int half, struct RacingWheelData *rwd)
@@ -98,8 +97,8 @@ static int VehPhysJoystick_NormalizeNativeDistance(int distFromCenter)
 	int distance = negative ? CTR_MipsNegLo(distFromCenter) : distFromCenter;
 
 	// Keep CTR's retail dead zone exactly intact. Only remap the active outer
-	// portion, where host-controller calibration asymmetry can otherwise make
-	// one steering direction fail the powerslide-start threshold.
+	// portion. A lower saturation point makes native steering more sensitive
+	// without changing the neutral zone or racing-wheel calibration.
 	if (distance > RACING_WHEEL_DEFAULT_DEAD_ZONE)
 	{
 		if (distance >= JOYSTICK_NATIVE_OUTER_SATURATION)
