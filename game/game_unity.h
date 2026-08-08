@@ -371,7 +371,10 @@
 #include "233/CS_Instance.c"
 #include "233/CS_ScriptCmd.c"
 #include "233/CS_Podium.c"
+#define CS_Thread_UseOpcode CS_Thread_UseOpcode_Original
 #include "233/CS_Thread.c"
+#undef CS_Thread_UseOpcode
+#include "BootIntroSkipCutscene.c"
 #include "233/CS_LoadBoss.c"
 #include "233/CS_Camera.c"
 #include "233/CS_BoxScene.c"
