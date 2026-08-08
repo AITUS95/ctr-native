@@ -1,0 +1,405 @@
+#include <common.h>
+
+// Manual-only curve assist for playable Story bosses.
+//
+// This code never sets ACTION_BOT, never calls BOTS_Driver_Convert, and never
+// swaps the driver's thread tick. L3 only arms a helper that reads the authored
+// BOTS nav path as a racing-line reference while the normal player physics stay
+// active. On bends it can reduce speed and strengthen/correct steering; on
+// straights the original player steering is left untouched.
+
+enum
+{
+	BOSS_MANUAL_CURVE_MAX_DRIVERS = 8,
+	BOSS_MANUAL_CURVE_NAV_PATHS = 3,
+	BOSS_MANUAL_CURVE_ANGLE_MASK = 0xfff,
+	BOSS_MANUAL_CURVE_ANGLE_HALF = 0x800,
+	BOSS_MANUAL_CURVE_LOOKAHEAD = 12,
+	BOSS_MANUAL_CURVE_TARGET_AHEAD = 5,
+	BOSS_MANUAL_CURVE_ENTRY_ANGLE = 0x100,
+	BOSS_MANUAL_CURVE_MEDIUM = 0x200,
+	BOSS_MANUAL_CURVE_TIGHT = 0x320,
+	BOSS_MANUAL_CURVE_HAIRPIN = 0x480,
+	BOSS_MANUAL_CURVE_SPEED_GENTLE = 0x5600,
+	BOSS_MANUAL_CURVE_SPEED_MEDIUM = 0x4c00,
+	BOSS_MANUAL_CURVE_SPEED_TIGHT = 0x4200,
+	BOSS_MANUAL_CURVE_SPEED_HAIRPIN = 0x3600,
+	BOSS_MANUAL_CURVE_MIN_STEER = 12,
+	BOSS_MANUAL_CURVE_STEER_DIVISOR = 8,
+	BOSS_MANUAL_CURVE_STEER_MAX = 0x60,
+	BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX = 0x20,
+	BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV = 5,
+};
+
+struct BossManualCurveState
+{
+	s16 characterID;
+	s16 levelID;
+	u8 initialized;
+	u8 enabled;
+	u16 _pad;
+	u32 lastToggleFrame;
+};
+
+struct BossManualCurveInfo
+{
+	int severity;
+	int hasAuthoredDrift;
+	int path;
+	int nearestIndex;
+	int targetYaw;
+};
+
+static struct BossManualCurveState s_bossManualCurveState[BOSS_MANUAL_CURVE_MAX_DRIVERS];
+
+static int BossManualCurve_GetCharacterID(struct Driver *driver)
+{
+	if (driver == NULL || (u32)driver->driverID >= BOSS_MANUAL_CURVE_MAX_DRIVERS)
+	{
+		return -1;
+	}
+	return data.characterIDs[driver->driverID];
+}
+
+static int BossManualCurve_IsBossCharacter(int characterID)
+{
+	switch (characterID)
+	{
+	case RIPPER_ROO:
+	case PAPU_PAPU:
+	case KOMODO_JOE:
+	case PINSTRIPE:
+	case NITROS_OXIDE:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int BossManualCurve_SignedAngleDelta(int target, int current)
+{
+	int delta = CTR_MipsSubLo(target, current) & BOSS_MANUAL_CURVE_ANGLE_MASK;
+	if (delta >= BOSS_MANUAL_CURVE_ANGLE_HALF)
+	{
+		delta = CTR_MipsSubLo(delta, BOSS_MANUAL_CURVE_ANGLE_MASK + 1);
+	}
+	return delta;
+}
+
+static int BossManualCurve_Abs(int value)
+{
+	return value < 0 ? CTR_MipsNegLo(value) : value;
+}
+
+static s64 BossManualCurve_NavScore(struct Driver *driver, const struct NavFrame *frame)
+{
+	int driverX = CTR_MipsSra(driver->posCurr.x, FRACTIONAL_BITS_8);
+	int driverZ = CTR_MipsSra(driver->posCurr.z, FRACTIONAL_BITS_8);
+	int dx = CTR_MipsSubLo(driverX, frame->pos.x);
+	int dz = CTR_MipsSubLo(driverZ, frame->pos.z);
+	int navYaw = CTR_MipsSll(frame->rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
+	int headingError = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(navYaw, driver->angle));
+
+	return ((s64)dx * dx + (s64)dz * dz) + ((s64)headingError * headingError << 2);
+}
+
+static int BossManualCurve_FindClosestNav(struct Driver *driver, int *pathOut, int *indexOut)
+{
+	int bestPath = -1;
+	int bestIndex = -1;
+	s64 bestScore = (s64)1 << 62;
+
+	for (int path = 0; path < BOSS_MANUAL_CURVE_NAV_PATHS; path++)
+	{
+		struct NavHeader *header = sdata->NavPath_ptrHeader[path];
+		struct NavFrame *frames = sdata->NavPath_ptrNavFrameArray[path];
+		if (header == NULL || frames == NULL || header->numPoints <= 1)
+		{
+			continue;
+		}
+
+		for (int index = 0; index < header->numPoints; index++)
+		{
+			s64 score = BossManualCurve_NavScore(driver, &frames[index]);
+			if (score < bestScore)
+			{
+				bestScore = score;
+				bestPath = path;
+				bestIndex = index;
+			}
+		}
+	}
+
+	if (bestPath < 0)
+	{
+		return 0;
+	}
+
+	*pathOut = bestPath;
+	*indexOut = bestIndex;
+	return 1;
+}
+
+static int BossManualCurve_WrapIndex(struct NavHeader *header, int index)
+{
+	while (index >= header->numPoints)
+	{
+		index -= header->numPoints;
+	}
+	while (index < 0)
+	{
+		index += header->numPoints;
+	}
+	return index;
+}
+
+static int BossManualCurve_Analyze(struct Driver *driver, struct BossManualCurveInfo *info)
+{
+	int path;
+	int nearestIndex;
+	if (!BossManualCurve_FindClosestNav(driver, &path, &nearestIndex))
+	{
+		return 0;
+	}
+
+	struct NavHeader *header = sdata->NavPath_ptrHeader[path];
+	struct NavFrame *frames = sdata->NavPath_ptrNavFrameArray[path];
+	if (header == NULL || frames == NULL || header->numPoints <= 1)
+	{
+		return 0;
+	}
+
+	int severity = 0;
+	int hasAuthoredDrift = 0;
+	int index = nearestIndex;
+	int prevYaw = CTR_MipsSll(frames[index].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
+
+	for (int step = 0; step < BOSS_MANUAL_CURVE_LOOKAHEAD; step++)
+	{
+		if ((frames[index].flags & BOTS_NAV_FLAG_DRIFT_MASK) != 0)
+		{
+			hasAuthoredDrift = 1;
+		}
+
+		int nextIndex = BossManualCurve_WrapIndex(header, index + 1);
+		int nextYaw = CTR_MipsSll(frames[nextIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
+		severity = CTR_MipsAddLo(severity, BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(nextYaw, prevYaw)));
+		if (severity > BOSS_MANUAL_CURVE_ANGLE_MASK)
+		{
+			severity = BOSS_MANUAL_CURVE_ANGLE_MASK;
+		}
+
+		prevYaw = nextYaw;
+		index = nextIndex;
+	}
+
+	int targetIndex = BossManualCurve_WrapIndex(header, nearestIndex + BOSS_MANUAL_CURVE_TARGET_AHEAD);
+	info->severity = severity;
+	info->hasAuthoredDrift = hasAuthoredDrift;
+	info->path = path;
+	info->nearestIndex = nearestIndex;
+	info->targetYaw = CTR_MipsSll(frames[targetIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
+	return hasAuthoredDrift || severity >= BOSS_MANUAL_CURVE_ENTRY_ANGLE;
+}
+
+static int BossManualCurve_GetSpeedCap(const struct BossManualCurveInfo *info)
+{
+	if (info->severity >= BOSS_MANUAL_CURVE_HAIRPIN)
+	{
+		return BOSS_MANUAL_CURVE_SPEED_HAIRPIN;
+	}
+	if (info->severity >= BOSS_MANUAL_CURVE_TIGHT)
+	{
+		return BOSS_MANUAL_CURVE_SPEED_TIGHT;
+	}
+	if (info->severity >= BOSS_MANUAL_CURVE_MEDIUM || info->hasAuthoredDrift)
+	{
+		return BOSS_MANUAL_CURVE_SPEED_MEDIUM;
+	}
+	return BOSS_MANUAL_CURVE_SPEED_GENTLE;
+}
+
+static void BossManualCurve_ClampSpeed(struct Driver *driver, const struct BossManualCurveInfo *info)
+{
+	int cap = BossManualCurve_GetSpeedCap(info);
+	int speedApprox = driver->speedApprox;
+	int absSpeed = BossManualCurve_Abs(speedApprox);
+
+	if (absSpeed > cap && absSpeed != 0)
+	{
+		driver->xSpeed = CTR_MipsDiv(CTR_MipsMulLo(driver->xSpeed, cap), absSpeed);
+		driver->zSpeed = CTR_MipsDiv(CTR_MipsMulLo(driver->zSpeed, cap), absSpeed);
+		driver->speedApprox = (s16)(speedApprox < 0 ? CTR_MipsNegLo(cap) : cap);
+	}
+
+	if (driver->speed > cap)
+	{
+		driver->speed = (s16)cap;
+	}
+	else if (driver->speed < -cap)
+	{
+		driver->speed = (s16)CTR_MipsNegLo(cap);
+	}
+
+	if (driver->baseSpeed > cap)
+	{
+		driver->baseSpeed = (s16)cap;
+	}
+	if (driver->terrainScaledBaseSpeed > cap)
+	{
+		driver->terrainScaledBaseSpeed = (s16)cap;
+	}
+}
+
+static int BossManualCurve_GetIdealSteer(struct Driver *driver, const struct BossManualCurveInfo *info)
+{
+	int delta = BossManualCurve_SignedAngleDelta(info->targetYaw, driver->angle);
+	int absDelta = BossManualCurve_Abs(delta);
+	if (absDelta < 0x20)
+	{
+		return 0;
+	}
+
+	// Positive simpTurnState is a right steer in the player physics. A positive
+	// target yaw delta therefore needs negative simpTurnState (left), and vice
+	// versa.
+	int steer = CTR_MipsDiv(CTR_MipsNegLo(delta), BOSS_MANUAL_CURVE_STEER_DIVISOR);
+	if (steer > BOSS_MANUAL_CURVE_STEER_MAX)
+	{
+		steer = BOSS_MANUAL_CURVE_STEER_MAX;
+	}
+	else if (steer < -BOSS_MANUAL_CURVE_STEER_MAX)
+	{
+		steer = -BOSS_MANUAL_CURVE_STEER_MAX;
+	}
+
+	if (steer > 0 && steer < BOSS_MANUAL_CURVE_MIN_STEER)
+	{
+		steer = BOSS_MANUAL_CURVE_MIN_STEER;
+	}
+	else if (steer < 0 && steer > -BOSS_MANUAL_CURVE_MIN_STEER)
+	{
+		steer = -BOSS_MANUAL_CURVE_MIN_STEER;
+	}
+
+	return steer;
+}
+
+static struct BossManualCurveState *BossManualCurve_GetState(struct Driver *driver)
+{
+	if (driver == NULL || (u32)driver->driverID >= BOSS_MANUAL_CURVE_MAX_DRIVERS)
+	{
+		return NULL;
+	}
+	return &s_bossManualCurveState[driver->driverID];
+}
+
+static void BossManualCurve_RefreshState(struct Driver *driver, struct BossManualCurveState *state)
+{
+	int characterID = BossManualCurve_GetCharacterID(driver);
+	int levelID = sdata->gGT != NULL ? sdata->gGT->levelID : -1;
+	if (!state->initialized || state->characterID != characterID || state->levelID != levelID)
+	{
+		memset(state, 0, sizeof(*state));
+		state->characterID = (s16)characterID;
+		state->levelID = (s16)levelID;
+		state->lastToggleFrame = (u32)-1;
+		state->initialized = 1;
+	}
+}
+
+void BossCornerAssist_UpdateToggle(struct Driver *driver)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct BossManualCurveState *state = BossManualCurve_GetState(driver);
+	if (driver == NULL || gGT == NULL || state == NULL)
+	{
+		return;
+	}
+
+	BossManualCurve_RefreshState(driver, state);
+	if (!BossManualCurve_IsBossCharacter(state->characterID))
+	{
+		state->enabled = 0;
+		return;
+	}
+
+	if ((sdata->gGamepads->gamepad[driver->driverID].buttonsTapped & BTN_L3) != 0 && state->lastToggleFrame != gGT->timer)
+	{
+		state->lastToggleFrame = gGT->timer;
+		state->enabled ^= 1;
+	}
+}
+
+static int BossManualCurve_CanAssist(struct Driver *driver, struct BossManualCurveState *state)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	if (driver == NULL || state == NULL || gGT == NULL || !state->enabled)
+	{
+		return 0;
+	}
+	if (!BossManualCurve_IsBossCharacter(state->characterID))
+	{
+		return 0;
+	}
+	if ((driver->actionsFlagSet & (ACTION_BOT | ACTION_RACE_FINISHED)) != 0 || gGT->trafficLightsTimer > 0)
+	{
+		return 0;
+	}
+	if (driver->kartState != KS_NORMAL && driver->kartState != KS_DRIFTING && driver->kartState != KS_ANTIVSHIFT)
+	{
+		return 0;
+	}
+	return 1;
+}
+
+// Public angular wrapper. PlayerDrivingFuncTable is built after this file is
+// included, so normal human driving points here instead of directly at retail.
+void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
+{
+	struct BossManualCurveState *state = BossManualCurve_GetState(driver);
+	if (state != NULL)
+	{
+		BossManualCurve_RefreshState(driver, state);
+	}
+
+	struct BossManualCurveInfo info;
+	int assisting = BossManualCurve_CanAssist(driver, state) && BossManualCurve_Analyze(driver, &info);
+	if (assisting)
+	{
+		BossManualCurve_ClampSpeed(driver, &info);
+
+		int idealSteer = BossManualCurve_GetIdealSteer(driver, &info);
+		driver->simpTurnState = (s8)idealSteer;
+		if (idealSteer < 0)
+		{
+			driver->actionsFlagSet |= ACTION_STEER_LEFT;
+		}
+		else if (idealSteer > 0)
+		{
+			driver->actionsFlagSet &= ~ACTION_STEER_LEFT;
+		}
+	}
+
+	VehPhysGeneral_PhysAngular_Original(thread, driver);
+
+	if (assisting)
+	{
+		// A small heading correction makes very tight bends dependable without
+		// replacing the rest of the player's physics. This changes only yaw; gas,
+		// brake, jump, drift buttons, weapons and collision remain human/player.
+		int delta = BossManualCurve_SignedAngleDelta(info.targetYaw, driver->angle);
+		int correction = CTR_MipsDiv(delta, BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV);
+		if (correction > BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
+		{
+			correction = BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
+		}
+		else if (correction < -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
+		{
+			correction = -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
+		}
+
+		driver->angle = (s16)(CTR_MipsAddLo(driver->angle, correction) & BOSS_MANUAL_CURVE_ANGLE_MASK);
+		driver->rotCurr.y = (s16)CTR_MipsAddLo(driver->rotCurr.y, correction);
+	}
+}
