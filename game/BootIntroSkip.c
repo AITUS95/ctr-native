@@ -2,12 +2,9 @@
 
 #ifdef CTR_NATIVE
 
-enum
-{
-	BOOT_INTRO_SKIP_SONG_SYNC_TIME = 0x11c0,
-};
+static int s_bootIntroSkipRequested;
 
-static int BootIntroSkip_IsStartHeld(void)
+static int BootIntroSkip_IsAnyButtonHeld(void)
 {
 	struct GamepadSystem *gGS = sdata->gGamepads;
 	if (gGS == NULL)
@@ -21,10 +18,48 @@ static int BootIntroSkip_IsStartHeld(void)
 		return 0;
 	}
 
-	// Controller packets are active-low. StateZero has already initialized the
-	// controller before it enters the blocking SCEA/XA wait, so raw Start is the
-	// only reliable input path this early in boot.
-	return (packet->controllerInput1 & RAW_BTN_START) == 0;
+	// PSX controller button bits are active-low. Reconstruct the same 16-bit
+	// digital field used by GAMEPAD_ProcessHold and accept any digital button,
+	// rather than reserving the shortcut for Start alone.
+	u32 rawInput = CTR_MipsSll((u32)packet->controllerInput1, 8) | (u32)packet->controllerInput2;
+	return (rawInput ^ 0xffff) != 0;
+}
+
+int BootIntroSkip_IsRequested(void)
+{
+	return s_bootIntroSkipRequested;
+}
+
+int BootIntroSkip_PollRequest(void)
+{
+	if (s_bootIntroSkipRequested)
+	{
+		return 1;
+	}
+
+	if (!BootIntroSkip_IsAnyButtonHeld())
+	{
+		return 0;
+	}
+
+	s_bootIntroSkipRequested = 1;
+	return 1;
+}
+
+void BootIntroSkip_ApplyMainMenuRedirect(struct GameTracker *gGT)
+{
+	if (gGT == NULL)
+	{
+		return;
+	}
+
+	// This is a real skip, not a fast-forward. Stop both pieces of the boot
+	// presentation and redirect the loader to the ordinary title/menu level.
+	// Never fake songPool[0].timeSpentPlaying to make the intro advance faster.
+	CDSYS_XAPauseForce();
+	CseqMusic_StopAll();
+	gGT->levelID = MAIN_MENU_LEVEL;
+	sdata->mainMenuState = MAIN_MENU_TITLE;
 }
 
 static void BootIntroSkip_RequestMainMenu(void)
@@ -35,33 +70,19 @@ static void BootIntroSkip_RequestMainMenu(void)
 		return;
 	}
 
-	// This wrapper is also used by the normal per-frame XA polling, so restrict
-	// the shortcut to the one-time first-boot sequence only.
+	// This wrapper is also used by normal per-frame XA polling, so restrict the
+	// shortcut to the one-time SCEA / Copyright / Naughty Dog boot presentation.
 	if (sdata->boolFirstBoot == 0 || gGT->levelID != NAUGHTY_DOG_CRATE || sdata->XA_State == XA_IDLE)
 	{
 		return;
 	}
 
-	if (!BootIntroSkip_IsStartHeld())
+	if (!BootIntroSkip_PollRequest())
 	{
 		return;
 	}
 
-	// Stop the spoken SCEA intro immediately. The first LOAD_TenStages pass would
-	// normally wait for the intro CSEQ to reach 0x11c0 while showing Copyright;
-	// advance that synchronization point too, so one Start press skips the whole
-	// boot presentation instead of requiring another input later.
-	CDSYS_XAPauseForce();
-	if (sdata->songPool[0].timeSpentPlaying < BOOT_INTRO_SKIP_SONG_SYNC_TIME)
-	{
-		sdata->songPool[0].timeSpentPlaying = BOOT_INTRO_SKIP_SONG_SYNC_TIME;
-	}
-
-	// The first loader has not started yet, so redirect its initial level from
-	// the Naughty Dog crate cutscene straight to the ordinary title/main-menu
-	// level. LOAD_TenStages will derive MAIN_MENU mode from this level normally.
-	gGT->levelID = MAIN_MENU_LEVEL;
-	sdata->mainMenuState = MAIN_MENU_TITLE;
+	BootIntroSkip_ApplyMainMenuRedirect(gGT);
 }
 
 #endif
