@@ -285,7 +285,17 @@ int VehPhysGeneral_GetBaseSpeed(struct Driver *driver)
 	}
 
 	speed = BossPlayable_ApplyOxideDamageResistance(driver, speed);
+
+	// Human-control floor: Story AI can deliberately slow a boss while it is
+	// ahead, but player drift initiation still compares speedApprox against the
+	// normal class threshold. Let rubber-band add catch-up speed, never remove
+	// the driver's normal (or Oxide damage-resistant) base speed.
+	int humanControlFloor = speed;
 	speed = CTR_MipsAddLo(speed, BossPlayable_GetRubberbandCorrection(driver, profile));
+	if (speed < humanControlFloor)
+	{
+		speed = humanControlFloor;
+	}
 
 	if (speed < 0)
 	{
@@ -339,6 +349,27 @@ static void BossPlayable_SetWeaponCooldown(struct BossPlayableWeaponState *state
 	                        meta->weaponCooldown + BOSS_PLAYABLE_WEAPON_COOLDOWN_BASE);
 }
 
+static void BossPlayable_DiscardCollectedWeapon(struct Driver *driver)
+{
+	if (BossPlayable_GetProfile(driver) == NULL)
+	{
+		return;
+	}
+
+	// Playable Story bosses use their scripted arsenal only. Weapon crates may
+	// still break normally, but roulette/held-item state is discarded before
+	// the next physics tick can turn it into a normal player weapon.
+	if (driver->heldItemID != HELD_ITEM_NONE || driver->itemRollTimer != 0 || driver->numHeldItems != 0)
+	{
+		driver->heldItemID = HELD_ITEM_NONE;
+		driver->itemRollTimer = 0;
+		driver->numHeldItems = 0;
+		driver->noItemTimer = 0;
+		driver->actionsFlagSet &= ~ACTION_WEAPON_FIRE_REQUEST;
+		driver->PickupTimeboxHUD.cooldown = 0;
+	}
+}
+
 static void BossPlayable_UpdateWeapons(struct Driver *driver)
 {
 	const struct BossPlayableProfile *profile = BossPlayable_GetProfile(driver);
@@ -383,8 +414,8 @@ static void BossPlayable_UpdateWeapons(struct Driver *driver)
 		speed = CTR_MipsNegLo(speed);
 	}
 
-	// Keep player-owned crate items intact. The boss weapon is an additional
-	// automatic ability rather than a replacement for normal human input.
+	// Scripted boss attacks require an empty player item slot. Crate weapons are
+	// discarded by BossPlayable_DiscardCollectedWeapon before this update.
 	if (driver->heldItemID != PICKUPBOTS_ITEM_NONE || driver->instTntRecv != NULL || driver->clockReceive != 0 ||
 	    driver->pendingDamageType != 0 || speed < BOSS_PLAYABLE_WEAPON_SPEED_MIN)
 	{
@@ -455,6 +486,7 @@ static void BossPlayable_UpdateWeapons(struct Driver *driver)
 void VehFrameProc_Driving(struct Thread *thread, struct Driver *driver)
 {
 	VehFrameProc_Driving_Original(thread, driver);
+	BossPlayable_DiscardCollectedWeapon(driver);
 	BossPlayable_UpdateWeapons(driver);
 }
 
