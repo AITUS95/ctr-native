@@ -2,11 +2,10 @@
 
 // Manual-only curve assist for playable Story bosses.
 //
-// This code never sets ACTION_BOT, never calls BOTS_Driver_Convert, and never
-// swaps the driver's thread tick. L3 only arms a helper that reads the authored
-// BOTS nav path as a racing-line reference while the normal player physics stay
-// active. On bends it can reduce speed and strengthen/correct steering; on
-// straights the original player steering is left untouched.
+// L3 never switches to BOTS. The authored nav path is used only as a reference
+// while normal player physics remain active. A long lookahead is allowed to
+// brake before a corner, but steering correction is deliberately gated by the
+// curvature immediately around the kart so straights remain fully manual.
 
 enum
 {
@@ -14,9 +13,15 @@ enum
 	BOSS_MANUAL_CURVE_NAV_PATHS = 3,
 	BOSS_MANUAL_CURVE_ANGLE_MASK = 0xfff,
 	BOSS_MANUAL_CURVE_ANGLE_HALF = 0x800,
-	BOSS_MANUAL_CURVE_LOOKAHEAD = 12,
-	BOSS_MANUAL_CURVE_TARGET_AHEAD = 5,
-	BOSS_MANUAL_CURVE_ENTRY_ANGLE = 0x100,
+
+	// Braking may anticipate a bend well before steering should begin.
+	BOSS_MANUAL_CURVE_BRAKE_LOOKAHEAD = 12,
+	BOSS_MANUAL_CURVE_STEER_LOOKAHEAD = 4,
+	BOSS_MANUAL_CURVE_TARGET_AHEAD = 2,
+	BOSS_MANUAL_CURVE_BRAKE_ENTRY_ANGLE = 0x100,
+	BOSS_MANUAL_CURVE_STEER_ENTRY_ANGLE = 0x40,
+	BOSS_MANUAL_CURVE_STEER_TARGET_DELTA = 0x30,
+
 	BOSS_MANUAL_CURVE_MEDIUM = 0x200,
 	BOSS_MANUAL_CURVE_TIGHT = 0x320,
 	BOSS_MANUAL_CURVE_HAIRPIN = 0x480,
@@ -24,11 +29,12 @@ enum
 	BOSS_MANUAL_CURVE_SPEED_MEDIUM = 0x4c00,
 	BOSS_MANUAL_CURVE_SPEED_TIGHT = 0x4200,
 	BOSS_MANUAL_CURVE_SPEED_HAIRPIN = 0x3600,
-	BOSS_MANUAL_CURVE_MIN_STEER = 12,
+
+	BOSS_MANUAL_CURVE_MIN_STEER = 10,
 	BOSS_MANUAL_CURVE_STEER_DIVISOR = 8,
-	BOSS_MANUAL_CURVE_STEER_MAX = 0x60,
-	BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX = 0x20,
-	BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV = 5,
+	BOSS_MANUAL_CURVE_STEER_MAX = 0x58,
+	BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX = 0x18,
+	BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV = 6,
 };
 
 struct BossManualCurveState
@@ -43,10 +49,13 @@ struct BossManualCurveState
 
 struct BossManualCurveInfo
 {
-	int severity;
-	int hasAuthoredDrift;
+	int severityAhead;
+	int severityLocal;
+	int driftAhead;
+	int driftLocal;
 	int path;
 	int nearestIndex;
+	int nearestYaw;
 	int targetYaw;
 };
 
@@ -100,6 +109,8 @@ static s64 BossManualCurve_NavScore(struct Driver *driver, const struct NavFrame
 	int navYaw = CTR_MipsSll(frame->rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 	int headingError = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(navYaw, driver->angle));
 
+	// Distance chooses the local racing line; heading rejects nearby branches at
+	// crossings or parallel pieces that face a different direction.
 	return ((s64)dx * dx + (s64)dz * dz) + ((s64)headingError * headingError << 2);
 }
 
@@ -169,24 +180,42 @@ static int BossManualCurve_Analyze(struct Driver *driver, struct BossManualCurve
 		return 0;
 	}
 
-	int severity = 0;
-	int hasAuthoredDrift = 0;
+	int severityAhead = 0;
+	int severityLocal = 0;
+	int driftAhead = 0;
+	int driftLocal = 0;
 	int index = nearestIndex;
 	int prevYaw = CTR_MipsSll(frames[index].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 
-	for (int step = 0; step < BOSS_MANUAL_CURVE_LOOKAHEAD; step++)
+	for (int step = 0; step < BOSS_MANUAL_CURVE_BRAKE_LOOKAHEAD; step++)
 	{
-		if ((frames[index].flags & BOTS_NAV_FLAG_DRIFT_MASK) != 0)
+		int isDrift = (frames[index].flags & BOTS_NAV_FLAG_DRIFT_MASK) != 0;
+		if (isDrift)
 		{
-			hasAuthoredDrift = 1;
+			driftAhead = 1;
+			if (step < BOSS_MANUAL_CURVE_STEER_LOOKAHEAD)
+			{
+				driftLocal = 1;
+			}
 		}
 
 		int nextIndex = BossManualCurve_WrapIndex(header, index + 1);
 		int nextYaw = CTR_MipsSll(frames[nextIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
-		severity = CTR_MipsAddLo(severity, BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(nextYaw, prevYaw)));
-		if (severity > BOSS_MANUAL_CURVE_ANGLE_MASK)
+		int delta = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(nextYaw, prevYaw));
+
+		severityAhead = CTR_MipsAddLo(severityAhead, delta);
+		if (step < BOSS_MANUAL_CURVE_STEER_LOOKAHEAD)
 		{
-			severity = BOSS_MANUAL_CURVE_ANGLE_MASK;
+			severityLocal = CTR_MipsAddLo(severityLocal, delta);
+		}
+
+		if (severityAhead > BOSS_MANUAL_CURVE_ANGLE_MASK)
+		{
+			severityAhead = BOSS_MANUAL_CURVE_ANGLE_MASK;
+		}
+		if (severityLocal > BOSS_MANUAL_CURVE_ANGLE_MASK)
+		{
+			severityLocal = BOSS_MANUAL_CURVE_ANGLE_MASK;
 		}
 
 		prevYaw = nextYaw;
@@ -194,25 +223,50 @@ static int BossManualCurve_Analyze(struct Driver *driver, struct BossManualCurve
 	}
 
 	int targetIndex = BossManualCurve_WrapIndex(header, nearestIndex + BOSS_MANUAL_CURVE_TARGET_AHEAD);
-	info->severity = severity;
-	info->hasAuthoredDrift = hasAuthoredDrift;
+	info->severityAhead = severityAhead;
+	info->severityLocal = severityLocal;
+	info->driftAhead = driftAhead;
+	info->driftLocal = driftLocal;
 	info->path = path;
 	info->nearestIndex = nearestIndex;
+	info->nearestYaw = CTR_MipsSll(frames[nearestIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 	info->targetYaw = CTR_MipsSll(frames[targetIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
-	return hasAuthoredDrift || severity >= BOSS_MANUAL_CURVE_ENTRY_ANGLE;
+
+	// A far bend can request pre-braking, but this return value alone never means
+	// steering should be applied. Steering has its own immediate-curvature gate.
+	return driftAhead || severityAhead >= BOSS_MANUAL_CURVE_BRAKE_ENTRY_ANGLE;
+}
+
+static int BossManualCurve_ShouldSteer(const struct BossManualCurveInfo *info)
+{
+	int targetDelta = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(info->targetYaw, info->nearestYaw));
+
+	// Do not chase the nav line on straights. Both the local path geometry and the
+	// short target must show a real direction change before automatic steering is
+	// allowed. A drift flag alone is not enough if the nearby yaw is still flat.
+	if (info->severityLocal < BOSS_MANUAL_CURVE_STEER_ENTRY_ANGLE)
+	{
+		return 0;
+	}
+	if (targetDelta < BOSS_MANUAL_CURVE_STEER_TARGET_DELTA)
+	{
+		return 0;
+	}
+
+	return 1;
 }
 
 static int BossManualCurve_GetSpeedCap(const struct BossManualCurveInfo *info)
 {
-	if (info->severity >= BOSS_MANUAL_CURVE_HAIRPIN)
+	if (info->severityAhead >= BOSS_MANUAL_CURVE_HAIRPIN)
 	{
 		return BOSS_MANUAL_CURVE_SPEED_HAIRPIN;
 	}
-	if (info->severity >= BOSS_MANUAL_CURVE_TIGHT)
+	if (info->severityAhead >= BOSS_MANUAL_CURVE_TIGHT)
 	{
 		return BOSS_MANUAL_CURVE_SPEED_TIGHT;
 	}
-	if (info->severity >= BOSS_MANUAL_CURVE_MEDIUM || info->hasAuthoredDrift)
+	if (info->severityAhead >= BOSS_MANUAL_CURVE_MEDIUM || info->driftAhead)
 	{
 		return BOSS_MANUAL_CURVE_SPEED_MEDIUM;
 	}
@@ -255,14 +309,11 @@ static int BossManualCurve_GetIdealSteer(struct Driver *driver, const struct Bos
 {
 	int delta = BossManualCurve_SignedAngleDelta(info->targetYaw, driver->angle);
 	int absDelta = BossManualCurve_Abs(delta);
-	if (absDelta < 0x20)
+	if (absDelta < BOSS_MANUAL_CURVE_STEER_TARGET_DELTA)
 	{
 		return 0;
 	}
 
-	// Positive simpTurnState is a right steer in the player physics. A positive
-	// target yaw delta therefore needs negative simpTurnState (left), and vice
-	// versa.
 	int steer = CTR_MipsDiv(CTR_MipsNegLo(delta), BOSS_MANUAL_CURVE_STEER_DIVISOR);
 	if (steer > BOSS_MANUAL_CURVE_STEER_MAX)
 	{
@@ -353,8 +404,9 @@ static int BossManualCurve_CanAssist(struct Driver *driver, struct BossManualCur
 	return 1;
 }
 
-// Public angular wrapper. PlayerDrivingFuncTable is built after this file is
-// included, so normal human driving points here instead of directly at retail.
+// Normal human angular physics remains the owner of the kart. The assist may
+// pre-brake for a distant corner, but it modifies steering/yaw only once the
+// immediate nav geometry confirms that the kart has actually reached the bend.
 void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 {
 	struct BossManualCurveState *state = BossManualCurve_GetState(driver);
@@ -364,11 +416,16 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 	}
 
 	struct BossManualCurveInfo info;
-	int assisting = BossManualCurve_CanAssist(driver, state) && BossManualCurve_Analyze(driver, &info);
-	if (assisting)
+	int curveAhead = BossManualCurve_CanAssist(driver, state) && BossManualCurve_Analyze(driver, &info);
+	int steerAssist = curveAhead && BossManualCurve_ShouldSteer(&info);
+
+	if (curveAhead)
 	{
 		BossManualCurve_ClampSpeed(driver, &info);
+	}
 
+	if (steerAssist)
+	{
 		int idealSteer = BossManualCurve_GetIdealSteer(driver, &info);
 		driver->simpTurnState = (s8)idealSteer;
 		if (idealSteer < 0)
@@ -383,11 +440,8 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 
 	VehPhysGeneral_PhysAngular_Original(thread, driver);
 
-	if (assisting)
+	if (steerAssist)
 	{
-		// A small heading correction makes very tight bends dependable without
-		// replacing the rest of the player's physics. This changes only yaw; gas,
-		// brake, jump, drift buttons, weapons and collision remain human/player.
 		int delta = BossManualCurve_SignedAngleDelta(info.targetYaw, driver->angle);
 		int correction = CTR_MipsDiv(delta, BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV);
 		if (correction > BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
