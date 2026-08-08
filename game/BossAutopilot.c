@@ -143,6 +143,43 @@ static void BossAutopilot_ResetState(struct Driver *driver, struct BossAutopilot
 	state->initialized = 1;
 }
 
+static void BossAutopilot_ResetPlayerCamera(struct Driver *driver)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	if (gGT == NULL || driver == NULL || (u32)driver->driverID >= 4)
+	{
+		return;
+	}
+
+	struct CameraDC *cDC = &gGT->cameraDC[driver->driverID];
+
+	// BOTS_Driver_Convert is retail's end-of-race player->CPU path. Even when
+	// the race-finished branch is avoided, special BOTS/camera states can leave
+	// transition data that is consumed a frame later. Returning to manual control
+	// must always start from the normal driver-follow camera, never an EOR path.
+	cDC->driverToFollow = driver;
+	cDC->cameraMode = 0;
+	cDC->cameraModePrev = 0;
+	cDC->currEOR = NULL;
+	cDC->trackPathNode = NULL;
+	cDC->trackPathProgress = 0;
+	cDC->transitionBlend = 0x1000;
+	cDC->transitionFrame = 0;
+	cDC->transitionFrameCount = 0;
+	cDC->spin360Angle = 0;
+	cDC->botFlagsPrevFrame = 0;
+	cDC->flags &= ~(CAMERA_FLAG_BATTLE_END_OF_RACE |
+	                 CAMERA_FLAG_ARCADE_END_OF_RACE_REQUESTED |
+	                 CAMERA_FLAG_TRACK_PATH_FACE_DRIVER |
+	                 CAMERA_FLAG_TRACK_PATH_ALT_BRANCH |
+	                 CAMERA_FLAG_TRANSITION_AWAY |
+	                 CAMERA_FLAG_TRANSITION_BACK |
+	                 CAMERA_FLAG_TRANSITION_HOLD |
+	                 CAMERA_FLAG_ARCADE_END_OF_RACE_ACTIVE |
+	                 CAMERA_FLAG_REVERSE);
+	cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
+}
+
 static void BossAutopilot_Disable(struct Thread *thread, struct Driver *driver, struct BossAutopilotState *state)
 {
 	if (state == NULL || !state->enabled)
@@ -171,6 +208,11 @@ static void BossAutopilot_Disable(struct Thread *thread, struct Driver *driver, 
 	driver->rotationSpinRate = 0;
 	driver->funcPtrs[DRIVER_FUNC_INIT] = VehPhysProc_Driving_Init;
 	VehPhysProc_Driving_Init(thread, driver);
+
+	// Snap the camera state back to ordinary player-follow in the same handoff.
+	// This removes intermittent post-BOTS spins caused by delayed transition/EOR
+	// camera state that can survive the physics conversion by one or more frames.
+	BossAutopilot_ResetPlayerCamera(driver);
 
 	state->pendingDisable = 0;
 	state->enabled = 0;
