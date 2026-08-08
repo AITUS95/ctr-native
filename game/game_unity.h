@@ -229,9 +229,7 @@
 #include "Vehicle/VehGroundShadow.c"
 
 #define VehPhysGeneral_GetBaseSpeed VehPhysGeneral_GetBaseSpeed_Original
-#define VehPhysGeneral_PhysAngular VehPhysGeneral_PhysAngular_Original
 #include "Vehicle/VehPhysGeneral.c"
-#undef VehPhysGeneral_PhysAngular
 #undef VehPhysGeneral_GetBaseSpeed
 
 #include "Vehicle/VehPhysJoystick.c"

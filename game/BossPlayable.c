@@ -309,37 +309,6 @@ int VehPhysGeneral_GetBaseSpeed(struct Driver *driver)
 	return speed;
 }
 
-void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
-{
-	const struct BossPlayableProfile *profile = BossPlayable_GetProfile(driver);
-	if (profile == NULL)
-	{
-		VehPhysGeneral_PhysAngular_Original(thread, driver);
-		return;
-	}
-
-	// The boss rubber-band raises real longitudinal speed beyond the character's
-	// retail class-speed envelope. Retail angular physics uses that class-speed
-	// value as a steering-resistance threshold; without compensation a boosted
-	// SPEED-class boss such as Papu can become artificially stiff in tight
-	// corners. Temporarily extend only that speed envelope by the positive boss
-	// correction. TurnRate, turn response and drift stats remain unchanged.
-	s16 originalClassSpeed = driver->const_Speed_ClassStat;
-	int correction = BossPlayable_GetRubberbandCorrection(driver, profile);
-	if (correction > 0)
-	{
-		int compensatedClassSpeed = CTR_MipsAddLo((int)originalClassSpeed, correction);
-		if (compensatedClassSpeed > 0x7fff)
-		{
-			compensatedClassSpeed = 0x7fff;
-		}
-		driver->const_Speed_ClassStat = (s16)compensatedClassSpeed;
-	}
-
-	VehPhysGeneral_PhysAngular_Original(thread, driver);
-	driver->const_Speed_ClassStat = originalClassSpeed;
-}
-
 static struct MetaDataBOSS *BossPlayable_SelectWeaponMeta(const struct BossPlayableProfile *profile, u8 checkpoint)
 {
 	struct MetaDataBOSS *base = data.bossWeaponMetaPtr[profile->weaponTableID];
