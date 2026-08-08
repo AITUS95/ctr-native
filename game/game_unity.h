@@ -80,6 +80,8 @@
 
 #include "HOWL/HOWL_OtherFX.c"
 #include "HOWL/HOWL_AudioLR.c"
+#include "HOWL/HOWL_OtherFXRecycle.c"
+#include "HOWL/HOWL_LevelAudio.c"
 #include "HOWL/HOWL_Engine.c"
 #include "HOWL/HOWL_Reverb.c"
 #include "HOWL/HOWL_CseqMusic.c"
@@ -358,6 +360,7 @@
 #include "232/AH_Map.c"
 #include "232/AH_Pause.c"
 #include "232/AH_HintMenu.c"
+#include "232/AH_MaskHint.c"
 #include "232/AH_Sign.c"
 
 #include "233/CS_Instance.c"
