@@ -27,7 +27,13 @@
 #include "CAM.c"
 
 #include "BOTS.c"
+
+// Keep the retail/native XA poller privately and expose a wrapper that can
+// consume raw Start during StateZero's blocking first-boot intro.
+#define CDSYS_XAPauseAtEnd CDSYS_XAPauseAtEnd_Original
 #include "CDSYS.c"
+#undef CDSYS_XAPauseAtEnd
+#include "BootIntroSkip.c"
 
 #include "COLL.c"
 
@@ -74,8 +80,6 @@
 
 #include "HOWL/HOWL_OtherFX.c"
 #include "HOWL/HOWL_AudioLR.c"
-#include "HOWL/HOWL_OtherFXRecycle.c"
-#include "HOWL/HOWL_LevelAudio.c"
 #include "HOWL/HOWL_Engine.c"
 #include "HOWL/HOWL_Reverb.c"
 #include "HOWL/HOWL_CseqMusic.c"
@@ -354,7 +358,6 @@
 #include "232/AH_Map.c"
 #include "232/AH_Pause.c"
 #include "232/AH_HintMenu.c"
-#include "232/AH_MaskHint.c"
 #include "232/AH_Sign.c"
 
 #include "233/CS_Instance.c"
