@@ -2,19 +2,19 @@
 
 // Manual-only curve assist for playable Story bosses.
 //
-// L3 never switches to BOTS. The authored nav path is used only as a reference
-// while normal player physics remain active. A long lookahead is allowed to
-// brake before a corner, but steering correction is deliberately gated by the
-// curvature immediately around the kart so straights remain fully manual.
+// There is no toggle and no BOTS takeover. The assist is context-sensitive:
+// it can run only while the player is actively steering or powersliding. The
+// authored BOTS nav path is used only as a racing-line reference while normal
+// player physics remain in full control of gas, brake, jump, drift and weapons.
 
 enum
 {
-	BOSS_MANUAL_CURVE_MAX_DRIVERS = 8,
 	BOSS_MANUAL_CURVE_NAV_PATHS = 3,
 	BOSS_MANUAL_CURVE_ANGLE_MASK = 0xfff,
 	BOSS_MANUAL_CURVE_ANGLE_HALF = 0x800,
 
-	// Braking may anticipate a bend well before steering should begin.
+	// A long window can anticipate braking, while steering requires the bend to
+	// be local to the kart so a distant corner never pulls the player sideways.
 	BOSS_MANUAL_CURVE_BRAKE_LOOKAHEAD = 12,
 	BOSS_MANUAL_CURVE_STEER_LOOKAHEAD = 4,
 	BOSS_MANUAL_CURVE_TARGET_AHEAD = 2,
@@ -37,36 +37,24 @@ enum
 	BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV = 6,
 };
 
-struct BossManualCurveState
-{
-	s16 characterID;
-	s16 levelID;
-	u8 initialized;
-	u8 enabled;
-	u16 _pad;
-	u32 lastToggleFrame;
-};
-
 struct BossManualCurveInfo
 {
 	int severityAhead;
 	int severityLocal;
 	int driftAhead;
-	int driftLocal;
 	int path;
 	int nearestIndex;
 	int nearestYaw;
 	int targetYaw;
 };
 
-static struct BossManualCurveState s_bossManualCurveState[BOSS_MANUAL_CURVE_MAX_DRIVERS];
-
 static int BossManualCurve_GetCharacterID(struct Driver *driver)
 {
-	if (driver == NULL || (u32)driver->driverID >= BOSS_MANUAL_CURVE_MAX_DRIVERS)
+	if (driver == NULL || (u32)driver->driverID >= 8)
 	{
 		return -1;
 	}
+
 	return data.characterIDs[driver->driverID];
 }
 
@@ -100,6 +88,55 @@ static int BossManualCurve_Abs(int value)
 	return value < 0 ? CTR_MipsNegLo(value) : value;
 }
 
+static int BossManualCurve_SameDirection(int a, int b)
+{
+	return (a < 0 && b < 0) || (a > 0 && b > 0);
+}
+
+static int BossManualCurve_PlayerRequestsAssist(struct Driver *driver)
+{
+	if (driver == NULL)
+	{
+		return 0;
+	}
+
+	// simpTurnState has already passed through CTR's normal stick dead zone by
+	// the time angular physics runs, so non-zero means genuine player steering.
+	// Powerslide remains eligible even if the stick is momentarily centered.
+	return ((s8)driver->simpTurnState != 0) || driver->kartState == KS_DRIFTING;
+}
+
+static int BossManualCurve_CanAssist(struct Driver *driver)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	if (driver == NULL || gGT == NULL)
+	{
+		return 0;
+	}
+
+	if (!BossManualCurve_IsBossCharacter(BossManualCurve_GetCharacterID(driver)))
+	{
+		return 0;
+	}
+
+	if (!BossManualCurve_PlayerRequestsAssist(driver))
+	{
+		return 0;
+	}
+
+	if ((driver->actionsFlagSet & (ACTION_BOT | ACTION_RACE_FINISHED)) != 0 || gGT->trafficLightsTimer > 0)
+	{
+		return 0;
+	}
+
+	if (driver->kartState != KS_NORMAL && driver->kartState != KS_DRIFTING && driver->kartState != KS_ANTIVSHIFT)
+	{
+		return 0;
+	}
+
+	return 1;
+}
+
 static s64 BossManualCurve_NavScore(struct Driver *driver, const struct NavFrame *frame)
 {
 	int driverX = CTR_MipsSra(driver->posCurr.x, FRACTIONAL_BITS_8);
@@ -110,7 +147,7 @@ static s64 BossManualCurve_NavScore(struct Driver *driver, const struct NavFrame
 	int headingError = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(navYaw, driver->angle));
 
 	// Distance chooses the local racing line; heading rejects nearby branches at
-	// crossings or parallel pieces that face a different direction.
+	// crossings and parallel pieces that face the wrong way.
 	return ((s64)dx * dx + (s64)dz * dz) + ((s64)headingError * headingError << 2);
 }
 
@@ -183,20 +220,14 @@ static int BossManualCurve_Analyze(struct Driver *driver, struct BossManualCurve
 	int severityAhead = 0;
 	int severityLocal = 0;
 	int driftAhead = 0;
-	int driftLocal = 0;
 	int index = nearestIndex;
 	int prevYaw = CTR_MipsSll(frames[index].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 
 	for (int step = 0; step < BOSS_MANUAL_CURVE_BRAKE_LOOKAHEAD; step++)
 	{
-		int isDrift = (frames[index].flags & BOTS_NAV_FLAG_DRIFT_MASK) != 0;
-		if (isDrift)
+		if ((frames[index].flags & BOTS_NAV_FLAG_DRIFT_MASK) != 0)
 		{
 			driftAhead = 1;
-			if (step < BOSS_MANUAL_CURVE_STEER_LOOKAHEAD)
-			{
-				driftLocal = 1;
-			}
 		}
 
 		int nextIndex = BossManualCurve_WrapIndex(header, index + 1);
@@ -226,14 +257,11 @@ static int BossManualCurve_Analyze(struct Driver *driver, struct BossManualCurve
 	info->severityAhead = severityAhead;
 	info->severityLocal = severityLocal;
 	info->driftAhead = driftAhead;
-	info->driftLocal = driftLocal;
 	info->path = path;
 	info->nearestIndex = nearestIndex;
 	info->nearestYaw = CTR_MipsSll(frames[nearestIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 	info->targetYaw = CTR_MipsSll(frames[targetIndex].rot[1], 4) & BOSS_MANUAL_CURVE_ANGLE_MASK;
 
-	// A far bend can request pre-braking, but this return value alone never means
-	// steering should be applied. Steering has its own immediate-curvature gate.
 	return driftAhead || severityAhead >= BOSS_MANUAL_CURVE_BRAKE_ENTRY_ANGLE;
 }
 
@@ -241,9 +269,6 @@ static int BossManualCurve_ShouldSteer(const struct BossManualCurveInfo *info)
 {
 	int targetDelta = BossManualCurve_Abs(BossManualCurve_SignedAngleDelta(info->targetYaw, info->nearestYaw));
 
-	// Do not chase the nav line on straights. Both the local path geometry and the
-	// short target must show a real direction change before automatic steering is
-	// allowed. A drift flag alone is not enough if the nearby yaw is still flat.
 	if (info->severityLocal < BOSS_MANUAL_CURVE_STEER_ENTRY_ANGLE)
 	{
 		return 0;
@@ -314,6 +339,8 @@ static int BossManualCurve_GetIdealSteer(struct Driver *driver, const struct Bos
 		return 0;
 	}
 
+	// Positive target yaw requires negative simpTurnState in CTR's player
+	// steering convention, and vice versa.
 	int steer = CTR_MipsDiv(CTR_MipsNegLo(delta), BOSS_MANUAL_CURVE_STEER_DIVISOR);
 	if (steer > BOSS_MANUAL_CURVE_STEER_MAX)
 	{
@@ -336,103 +363,76 @@ static int BossManualCurve_GetIdealSteer(struct Driver *driver, const struct Bos
 	return steer;
 }
 
-static struct BossManualCurveState *BossManualCurve_GetState(struct Driver *driver)
+static int BossManualCurve_GetAssistedSteer(struct Driver *driver, int idealSteer)
 {
-	if (driver == NULL || (u32)driver->driverID >= BOSS_MANUAL_CURVE_MAX_DRIVERS)
+	int playerSteer = (s8)driver->simpTurnState;
+
+	// During a powerslide the nav correction may take the stronger role even if
+	// the stick crosses center for a moment.
+	if (driver->kartState == KS_DRIFTING)
 	{
-		return NULL;
+		return idealSteer;
 	}
-	return &s_bossManualCurveState[driver->driverID];
+
+	if (playerSteer == 0 || idealSteer == 0)
+	{
+		return playerSteer;
+	}
+
+	// Never fight a deliberate opposite steering input. Assistance strengthens
+	// only the direction the player has already chosen.
+	if (!BossManualCurve_SameDirection(playerSteer, idealSteer))
+	{
+		return playerSteer;
+	}
+
+	int playerMagnitude = BossManualCurve_Abs(playerSteer);
+	int idealMagnitude = BossManualCurve_Abs(idealSteer);
+	if (idealMagnitude <= playerMagnitude)
+	{
+		return playerSteer;
+	}
+
+	// Blend toward the ideal line without replacing the player's steering feel.
+	return CTR_MipsDiv(CTR_MipsAddLo(CTR_MipsMulLo(playerSteer, 2), idealSteer), 3);
 }
 
-static void BossManualCurve_RefreshState(struct Driver *driver, struct BossManualCurveState *state)
-{
-	int characterID = BossManualCurve_GetCharacterID(driver);
-	int levelID = sdata->gGT != NULL ? sdata->gGT->levelID : -1;
-	if (!state->initialized || state->characterID != characterID || state->levelID != levelID)
-	{
-		memset(state, 0, sizeof(*state));
-		state->characterID = (s16)characterID;
-		state->levelID = (s16)levelID;
-		state->lastToggleFrame = (u32)-1;
-		state->initialized = 1;
-	}
-}
-
-void BossCornerAssist_UpdateToggle(struct Driver *driver)
-{
-	struct GameTracker *gGT = sdata->gGT;
-	struct BossManualCurveState *state = BossManualCurve_GetState(driver);
-	if (driver == NULL || gGT == NULL || state == NULL)
-	{
-		return;
-	}
-
-	BossManualCurve_RefreshState(driver, state);
-	if (!BossManualCurve_IsBossCharacter(state->characterID))
-	{
-		state->enabled = 0;
-		return;
-	}
-
-	if ((sdata->gGamepads->gamepad[driver->driverID].buttonsTapped & BTN_L3) != 0 && state->lastToggleFrame != gGT->timer)
-	{
-		state->lastToggleFrame = gGT->timer;
-		state->enabled ^= 1;
-	}
-}
-
-static int BossManualCurve_CanAssist(struct Driver *driver, struct BossManualCurveState *state)
-{
-	struct GameTracker *gGT = sdata->gGT;
-	if (driver == NULL || state == NULL || gGT == NULL || !state->enabled)
-	{
-		return 0;
-	}
-	if (!BossManualCurve_IsBossCharacter(state->characterID))
-	{
-		return 0;
-	}
-	if ((driver->actionsFlagSet & (ACTION_BOT | ACTION_RACE_FINISHED)) != 0 || gGT->trafficLightsTimer > 0)
-	{
-		return 0;
-	}
-	if (driver->kartState != KS_NORMAL && driver->kartState != KS_DRIFTING && driver->kartState != KS_ANTIVSHIFT)
-	{
-		return 0;
-	}
-	return 1;
-}
-
-// Normal human angular physics remains the owner of the kart. The assist may
-// pre-brake for a distant corner, but it modifies steering/yaw only once the
-// immediate nav geometry confirms that the kart has actually reached the bend.
+// Normal human angular physics always owns the kart. Assistance exists only
+// while the player is steering or powersliding; with centered steering in normal
+// driving this function is exactly the retail angular path.
 void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 {
-	struct BossManualCurveState *state = BossManualCurve_GetState(driver);
-	if (state != NULL)
+	if (!BossManualCurve_CanAssist(driver))
 	{
-		BossManualCurve_RefreshState(driver, state);
+		VehPhysGeneral_PhysAngular_Original(thread, driver);
+		return;
 	}
 
 	struct BossManualCurveInfo info;
-	int curveAhead = BossManualCurve_CanAssist(driver, state) && BossManualCurve_Analyze(driver, &info);
-	int steerAssist = curveAhead && BossManualCurve_ShouldSteer(&info);
-
-	if (curveAhead)
+	int curveAhead = BossManualCurve_Analyze(driver, &info);
+	if (!curveAhead)
 	{
-		BossManualCurve_ClampSpeed(driver, &info);
+		VehPhysGeneral_PhysAngular_Original(thread, driver);
+		return;
 	}
 
+	// Since the player is already steering/drifting, braking is allowed to use
+	// the longer lookahead to make tight entries safer.
+	BossManualCurve_ClampSpeed(driver, &info);
+
+	int steerAssist = BossManualCurve_ShouldSteer(&info);
+	int assistedSteer = (s8)driver->simpTurnState;
 	if (steerAssist)
 	{
 		int idealSteer = BossManualCurve_GetIdealSteer(driver, &info);
-		driver->simpTurnState = (s8)idealSteer;
-		if (idealSteer < 0)
+		assistedSteer = BossManualCurve_GetAssistedSteer(driver, idealSteer);
+		driver->simpTurnState = (s8)assistedSteer;
+
+		if (assistedSteer < 0)
 		{
 			driver->actionsFlagSet |= ACTION_STEER_LEFT;
 		}
-		else if (idealSteer > 0)
+		else if (assistedSteer > 0)
 		{
 			driver->actionsFlagSet &= ~ACTION_STEER_LEFT;
 		}
@@ -442,18 +442,27 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 
 	if (steerAssist)
 	{
-		int delta = BossManualCurve_SignedAngleDelta(info.targetYaw, driver->angle);
-		int correction = CTR_MipsDiv(delta, BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV);
-		if (correction > BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
-		{
-			correction = BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
-		}
-		else if (correction < -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
-		{
-			correction = -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
-		}
+		int idealSteer = BossManualCurve_GetIdealSteer(driver, &info);
+		int playerSteer = assistedSteer;
 
-		driver->angle = (s16)(CTR_MipsAddLo(driver->angle, correction) & BOSS_MANUAL_CURVE_ANGLE_MASK);
-		driver->rotCurr.y = (s16)CTR_MipsAddLo(driver->rotCurr.y, correction);
+		// In normal steering, apply yaw correction only when the assisted direction
+		// agrees with the ideal curve. A deliberate opposite input remains manual.
+		if (driver->kartState == KS_DRIFTING ||
+		    (playerSteer != 0 && idealSteer != 0 && BossManualCurve_SameDirection(playerSteer, idealSteer)))
+		{
+			int delta = BossManualCurve_SignedAngleDelta(info.targetYaw, driver->angle);
+			int correction = CTR_MipsDiv(delta, BOSS_MANUAL_CURVE_YAW_CORRECTION_DIV);
+			if (correction > BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
+			{
+				correction = BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
+			}
+			else if (correction < -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX)
+			{
+				correction = -BOSS_MANUAL_CURVE_YAW_CORRECTION_MAX;
+			}
+
+			driver->angle = (s16)(CTR_MipsAddLo(driver->angle, correction) & BOSS_MANUAL_CURVE_ANGLE_MASK);
+			driver->rotCurr.y = (s16)CTR_MipsAddLo(driver->rotCurr.y, correction);
+		}
 	}
 }
