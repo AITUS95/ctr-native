@@ -1,10 +1,8 @@
 #include <common.h>
 
-// L3 now toggles only the manual curve-assist state. The assist itself lives in
-// BossCornerAssistPhysics.c and runs inside normal player angular physics; this
-// frame wrapper never converts the player to BOTS or changes the thread tick.
+// Curve assist is now fully contextual: BossCornerAssistPhysics.c activates it
+// only while the player is steering or powersliding. No L3 toggle/state remains.
 void VehFrameProc_Driving(struct Thread *thread, struct Driver *driver)
 {
 	VehFrameProc_Driving_BossPlayable(thread, driver);
-	BossCornerAssist_UpdateToggle(driver);
 }
