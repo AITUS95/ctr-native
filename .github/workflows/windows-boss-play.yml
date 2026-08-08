@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-windows:
     name: Build Windows x86
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout boss-play
