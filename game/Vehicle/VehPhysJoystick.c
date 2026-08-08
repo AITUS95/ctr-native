@@ -9,9 +9,9 @@ enum
 	// not default range minus default dead zone.
 	RACING_WHEEL_DEFAULT_STRENGTH_DISTANCE = 0x5e,
 	JOYSTICK_STRENGTH_CURVE_SEGMENTS = 5,
-	// Keep CTR's original inner dead zone, but reach full native steering sooner
-	// so the kart responds more strongly to moderate analog-stick movement.
-	JOYSTICK_NATIVE_OUTER_SATURATION = 0x60,
+	// Keep CTR's original inner dead zone, but reach full native steering much
+	// sooner so moderate analog-stick movement produces a stronger turn.
+	JOYSTICK_NATIVE_OUTER_SATURATION = 0x50,
 };
 
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_CENTER == 0x80);
@@ -19,7 +19,7 @@ CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_DEAD_ZONE == 0x30);
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_RANGE == 0x7f);
 CTR_STATIC_ASSERT(RACING_WHEEL_DEFAULT_STRENGTH_DISTANCE == 0x5e);
 CTR_STATIC_ASSERT(JOYSTICK_STRENGTH_CURVE_SEGMENTS == 5);
-CTR_STATIC_ASSERT(JOYSTICK_NATIVE_OUTER_SATURATION == 0x60);
+CTR_STATIC_ASSERT(JOYSTICK_NATIVE_OUTER_SATURATION == 0x50);
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006163c-0x800616b0.
 int VehPhysJoystick_ReturnToRest(int stickVal, int half, struct RacingWheelData *rwd)
