@@ -22,6 +22,7 @@ struct BossAutopilotState
 	s16 levelID;
 	u8 initialized;
 	u8 enabled;
+	u32 lastToggleFrame;
 	void (*savedThTick)(struct Thread *);
 };
 
@@ -132,6 +133,7 @@ static void BossAutopilot_ResetState(struct Driver *driver, struct BossAutopilot
 	memset(state, 0, sizeof(*state));
 	state->characterID = (s16)BossAutopilot_GetCharacterID(driver);
 	state->levelID = (s16)sdata->gGT->levelID;
+	state->lastToggleFrame = (u32)-1;
 	state->initialized = 1;
 }
 
@@ -267,6 +269,17 @@ static void BossAutopilot_UpdateToggle(struct Thread *thread, struct Driver *dri
 	{
 		return;
 	}
+
+	// A newly-enabled BOTS thread can execute later in this same game frame and
+	// calls VehFrameProc_Driving again. buttonsTapped still contains the original
+	// L3 edge at that point, so without this guard the very same click enables
+	// and then immediately disables autopilot. Consume a toggle at most once per
+	// gGT frame; a later physical L3 click on a new frame can toggle normally.
+	if (state->lastToggleFrame == gGT->timer)
+	{
+		return;
+	}
+	state->lastToggleFrame = gGT->timer;
 
 	if (state->enabled)
 	{
