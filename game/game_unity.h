@@ -264,7 +264,17 @@
 #include "230/MM_MenuFlow.c"
 #include "230/MM_Title.c"
 #include "230/MM_CheatCodes.c"
+
+// Keep retail menu logic available privately. FullRoster.c wraps the two
+// entrypoints that need setup/extra drawing while leaving the decompiled menu
+// implementation itself untouched.
+#define MM_Characters_RestoreIDs MM_Characters_RestoreIDs_Retail
+#define MM_Characters_MenuProc MM_Characters_MenuProc_Retail
 #include "230/MM_Characters.c"
+#undef MM_Characters_MenuProc
+#undef MM_Characters_RestoreIDs
+#include "FullRoster.c"
+
 #include "230/MM_TrackSelect.c"
 #include "230/MM_CupSelect.c"
 #include "230/MM_HighScore.c"
