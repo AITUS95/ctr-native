@@ -436,7 +436,6 @@ static void BossPlayable_UpdateWeapons(struct Driver *driver)
 		return;
 	}
 
-	struct Driver *reference = BossPlayable_FindReferenceDriver(driver);
 	int throwFlag = localMeta.throwFlag;
 	int weaponFlags = (throwFlag == BOSS_WEAPON_THROW) ? PICKUPBOTS_SHOOT_FLAG_RANDOM : 0;
 	u8 oldWumpa = driver->numWumpas;
@@ -445,17 +444,10 @@ static void BossPlayable_UpdateWeapons(struct Driver *driver)
 	driver->numWumpas = ((localMeta.juiceFlag & BOSS_WEAPON_JUICED) != 0) ? DRIVER_WUMPA_JUICED_COUNT : 0;
 	driver->heldItemID = (u8)weaponID;
 
-	if (reference != NULL)
-	{
-		if ((u16)(weaponID - PICKUPBOTS_ITEM_TNT) < 2)
-		{
-			PickupBots_PlayVoice(PICKUPBOTS_VOICELINE_MINE_DROP, driver, reference);
-		}
-		else if (weaponID == PICKUPBOTS_ITEM_BOMB)
-		{
-			PickupBots_PlayVoice(PICKUPBOTS_VOICELINE_BOMB, driver, reference);
-		}
-	}
+	// Do not request boss attack XA here. On the native backend, starting a new
+	// XA track currently prepares it synchronously (file open/sector scan/copy)
+	// on the gameplay thread. The scripted weapon behavior is unchanged, while
+	// avoiding intermittent frame-time spikes when an automatic attack fires.
 
 	if (weaponID == PICKUPBOTS_ITEM_BOMB)
 	{
